@@ -1,18 +1,17 @@
 module.exports = async (req, res) => {
-  // Configuración de cabeceras CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET');
 
   const keyword = req.query.q || 'wordpress';
-  
-  // Usar el token desde las variables de entorno o fallback directo
+  const sort = req.query.sort || 'recency';
+
   const SCRAPE_DO_TOKEN = process.env.SCRAPE_DO_TOKEN || '3c2162fa0c8d46029d7a655532558984fad63d065db';
 
-  // URL del Feed RSS de Upwork
-  const targetUrl = `https://www.upwork.com/ab/feed/jobs/rss?q=${encodeURIComponent(keyword)}&sort=recency`;
+  // URL objetivo de la búsqueda en la web de Upwork
+  const targetUrl = `https://www.upwork.com/nx/search/jobs/?q=${encodeURIComponent(keyword)}&sort=${sort}`;
 
-  // Construir la URL de Scrape.do con super proxy habilitado para evadir Cloudflare
-  const scrapeDoUrl = `https://api.scrape.do/?token=${SCRAPE_DO_TOKEN}&url=${encodeURIComponent(targetUrl)}&super=true`;
+  // Usamos render=true para ejecutar JS y super=true para proxies residenciales
+  const scrapeDoUrl = `https://api.scrape.do/?token=${SCRAPE_DO_TOKEN}&url=${encodeURIComponent(targetUrl)}&render=true&super=true`;
 
   try {
     const response = await fetch(scrapeDoUrl);
@@ -20,68 +19,55 @@ module.exports = async (req, res) => {
     if (!response.ok) {
       return res.status(response.status).json({
         success: false,
-        error: `Scrape.do devolvió un estado HTTP ${response.status}`
+        error: `Scrape.do devolvió estado HTTP ${response.status}`
       });
     }
 
-    const xmlText = await response.text();
+    const htmlText = await response.text();
 
-    // Validar si la respuesta contiene XML de Upwork
-    if (!xmlText.includes('<item>')) {
+    // Si la respuesta aún muestra el reto de Cloudflare
+    if (htmlText.includes('Just a moment...') || htmlText.includes('Attention Required!')) {
       return res.status(200).json({
         success: false,
-        message: 'No se encontraron resultados o la estructura XML no fue reconocida.',
-        rawPreview: xmlText.substring(0, 200)
+        message: 'Cloudflare bloqueó la Petición. Intenta nuevamente.',
+        pageTitle: 'Just a moment...'
       });
     }
 
-    // Extraer y procesar cada oferta (<item>) del XML
-    const items = xmlText.split('<item>').slice(1);
+    // Extraer enlaces e información de ofertas de trabajo desde el HTML renderizado
+    // Extraemos los bloques de anuncios mediante expresiones regulares básicas
+    const jobRegex = /<article[\s\S]*?<\/article>/g;
+    const matches = htmlText.match(jobRegex) || [];
 
-    const jobs = items.map(item => {
-      // Extraer Título
-      const titleMatch = item.match(/<title><!\[CDATA\[(.*?)\]\]><\/title>/s) || item.match(/<title>(.*?)<\/title>/s);
-      let title = titleMatch ? titleMatch[1].trim() : 'Sin título';
-      title = title.replace(/^Upwork\s*-\s*/i, '');
+    const jobs = matches.map(articleHtml => {
+      // Extraer enlace y título
+      const titleMatch = articleHtml.match(/<a[^>]*href="(\/nx\/search\/jobs\/details\/~[^"]+)"[^>]*>(.*?)<\/a>/s) ||
+                         articleHtml.match(/<a[^>]*href="(\/jobs\/~[^"]+)"[^>]*>(.*?)<\/a>/s);
 
-      // Extraer Enlace
-      const linkMatch = item.match(/<link>(.*?)<\/link>/s);
-      const link = linkMatch ? linkMatch[1].trim() : null;
+      const rawLink = titleMatch ? titleMatch[1] : null;
+      const rawTitle = titleMatch ? titleMatch[2].replace(/<[^>]+>/g, '').trim() : null;
 
-      // Extraer Descripción breve
-      const descMatch = item.match(/<description><!\[CDATA\[(.*?)\]\]><\/description>/s) || item.match(/<description>(.*?)<\/description>/s);
-      let rawDesc = descMatch ? descMatch[1] : '';
-      
-      const cleanDesc = rawDesc
-        .replace(/<[^>]+>/g, ' ')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&amp;/g, '&')
-        .replace(/\s+/g, ' ')
-        .trim();
-
-      // Extraer Fecha de publicación
-      const dateMatch = item.match(/<pubDate>(.*?)<\/pubDate>/s);
-      const pubDate = dateMatch ? dateMatch[1].trim() : '';
+      // Extraer descripción limpia
+      const descMatch = articleHtml.match(/<p[^>]*>(.*?)<\/p>/s) || articleHtml.match(/data-test="JobDescription"[^>]*>(.*?)<\/div>/s);
+      let description = descMatch ? descMatch[1].replace(/<[^>]+>/g, ' ').trim() : '';
 
       return {
-        title,
-        link,
-        pubDate,
-        description: cleanDesc.substring(0, 200) + (cleanDesc.length > 200 ? '...' : '')
+        title: rawTitle,
+        link: rawLink ? `https://www.upwork.com${rawLink}` : null,
+        description: description.substring(0, 180) + (description.length > 180 ? '...' : '')
       };
-    }).filter(job => job.link !== null);
+    }).filter(job => job.title && job.link);
 
     return res.status(200).json({
       success: true,
       query: keyword,
-      provider: 'Scrape.do',
+      provider: 'Scrape.do (Render + SuperProxy)',
       count: jobs.length,
       data: jobs
     });
 
   } catch (error) {
-    console.error('Error al realizar scraping:', error);
+    console.error('Error al ejecutar scraping:', error);
     return res.status(500).json({ success: false, error: error.message });
   }
 };
