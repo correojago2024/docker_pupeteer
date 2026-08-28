@@ -19,41 +19,60 @@ module.exports = async (req, res) => {
 
   let browser;
   try {
-    // 1. Conectarse a Browserless con parámetros para bloquear imágenes/estilos en el servidor de Browserless
-    const browserWSEndpoint = `wss://production-sfo.browserless.io?token=${BROWSERLESS_TOKEN}&--no-sandbox=true&--disable-setuid-sandbox=true&--block-resources=image,stylesheet,font,media`;
+    // Solo bloqueamos imágenes y medios para acelerar, pero dejamos pasar CSS/JS para que React renderice los trabajos
+    const browserWSEndpoint = `wss://production-sfo.browserless.io?token=${BROWSERLESS_TOKEN}&--block-resources=image,media`;
     
     browser = await puppeteer.connect({ browserWSEndpoint });
 
     const page = await browser.newPage();
 
-    // 2. Ocultar huellas de automatización
+    // 1. Emular una resolución y User-Agent real
+    await page.setViewport({ width: 1280, height: 800 });
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     );
 
-    // 3. Usar 'domcontentloaded' en lugar de 'networkidle2' para no esperar a que todos los trackers carguen
-    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 10000 });
+    // 2. Navegar esperando la carga inicial
+    await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
 
-    // 4. Esperar específicamente a los contenedores de los empleos (máximo 4 segundos)
-    const jobSelector = 'section[data-ev-label="search_results_impression"] article, article.job-tile, article';
-    await page.waitForSelector(jobSelector, { timeout: 4000 }).catch(() => null);
+    // 3. Esperar específicamente a que aparezca cualquier contenedor de trabajo en el DOM
+    const selectorsToWait = [
+      'article',
+      '[data-test="job-tile-list"]',
+      'section[data-ev-label="search_results_impression"]'
+    ];
+    
+    await Promise.race(
+      selectorsToWait.map(selector => page.waitForSelector(selector, { timeout: 6000 }))
+    ).catch(() => null);
 
-    // 5. Extracción de datos
+    // Un pequeño delay adicional para que termine el pintado de componentes
+    await new Promise(resolve => setTimeout(resolve, 1500));
+
+    // 4. Extracción flexibilizada de datos
     const jobs = await page.evaluate(() => {
-      const articles = Array.from(document.querySelectorAll('article'));
-      return articles.map(art => {
-        const titleEl = art.querySelector('h2 a, h3 a, a[data-test="UpLink"]');
-        const title = titleEl ? titleEl.innerText.trim() : 'Sin título';
-        const link = titleEl ? titleEl.href : null;
+      // Buscar elementos tipo article o con data-test de empleo
+      const cards = Array.from(
+        document.querySelectorAll('article, [data-test="job-tile-list"] > div, section article')
+      );
 
-        const jobTypeEl = art.querySelector('[data-test="job-type"], [data-test="JobTileHeader"]');
-        const jobType = jobTypeEl ? jobTypeEl.innerText.replace(/\n/g, ' ').trim() : 'No especificado';
+      return cards.map(card => {
+        // Enlace y Título
+        const linkEl = card.querySelector('a[href*="/jobs/"], h2 a, h3 a, [data-test="UpLink"]');
+        const title = linkEl ? linkEl.innerText.trim() : null;
+        const link = linkEl ? linkEl.href : null;
 
-        const descriptionEl = art.querySelector('[data-test="JobDescription"], .job-description, p');
-        const description = descriptionEl ? descriptionEl.innerText.trim() : '';
+        // Presupuesto / Tipo de Trabajo
+        const typeEl = card.querySelector('[data-test="job-type"], [data-test="JobTileHeader"], ul.list-inline');
+        const jobType = typeEl ? typeEl.innerText.replace(/\n/g, ' ').trim() : 'No especificado';
 
-        const postedTimeEl = art.querySelector('[data-test="posted-on"], small, span.text-muted');
-        const postedTime = postedTimeEl ? postedTimeEl.innerText.trim() : '';
+        // Descripción
+        const descEl = card.querySelector('[data-test="JobDescription"], .job-description, p');
+        const description = descEl ? descEl.innerText.trim() : '';
+
+        // Tiempo de publicación
+        const timeEl = card.querySelector('[data-test="posted-on"], small, span.text-muted');
+        const postedTime = timeEl ? timeEl.innerText.trim() : '';
 
         return {
           title,
@@ -62,7 +81,7 @@ module.exports = async (req, res) => {
           postedTime,
           description: description.substring(0, 180) + (description.length > 180 ? '...' : '')
         };
-      }).filter(job => job.link !== null);
+      }).filter(job => job.title && job.link); // Filtrar solo los que realmente tengan título y enlace
     });
 
     await browser.disconnect();
