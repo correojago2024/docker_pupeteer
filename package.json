@@ -1,0 +1,13 @@
+{
+  "name": "upwork-scraper",
+  "version": "1.0.0",
+  "description": "Scraper de Upwork usando Puppeteer y Express para Render",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "puppeteer": "^22.6.0"
+  }
+}
