@@ -1,20 +1,25 @@
 module.exports = async (req, res) => {
+  // Configuración de cabeceras CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET');
 
   const keyword = req.query.q || 'wordpress';
-  const sort = req.query.sort || 'recency';
-
   const SCRAPE_DO_TOKEN = process.env.SCRAPE_DO_TOKEN || '3c2162fa0c8d46029d7a655532558984fad63d065db';
 
-  // URL objetivo de la búsqueda en la web de Upwork
-  const targetUrl = `https://www.upwork.com/nx/search/jobs/?q=${encodeURIComponent(keyword)}&sort=${sort}`;
+  // Apuntamos a la URL de búsqueda web de Upwork
+  const targetUrl = `https://www.upwork.com/nx/search/jobs/?q=${encodeURIComponent(keyword)}&sort=recency`;
 
-  // Usamos render=true para ejecutar JS y super=true para proxies residenciales
-  const scrapeDoUrl = `https://api.scrape.do/?token=${SCRAPE_DO_TOKEN}&url=${encodeURIComponent(targetUrl)}&render=true&super=true`;
+  // Se omitió render=true para evitar el timeout de 10s de Vercel.
+  // super=true + geoCode=us enruta la petición por residencial de EE.UU. rápido.
+  const scrapeDoUrl = `https://api.scrape.do/?token=${SCRAPE_DO_TOKEN}&url=${encodeURIComponent(targetUrl)}&super=true&geoCode=us`;
 
   try {
-    const response = await fetch(scrapeDoUrl);
+    const response = await fetch(scrapeDoUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept-Language': 'en-US,en;q=0.9'
+      }
+    });
 
     if (!response.ok) {
       return res.status(response.status).json({
@@ -25,29 +30,27 @@ module.exports = async (req, res) => {
 
     const htmlText = await response.text();
 
-    // Si la respuesta aún muestra el reto de Cloudflare
+    // Verificación de bloqueo Cloudflare en texto plano
     if (htmlText.includes('Just a moment...') || htmlText.includes('Attention Required!')) {
       return res.status(200).json({
         success: false,
-        message: 'Cloudflare bloqueó la Petición. Intenta nuevamente.',
-        pageTitle: 'Just a moment...'
+        message: 'Respuesta retenida por la verificación de Cloudflare.',
+        count: 0,
+        data: []
       });
     }
 
-    // Extraer enlaces e información de ofertas de trabajo desde el HTML renderizado
-    // Extraemos los bloques de anuncios mediante expresiones regulares básicas
+    // Extracción de ofertas usando regex sobre el código HTML
     const jobRegex = /<article[\s\S]*?<\/article>/g;
     const matches = htmlText.match(jobRegex) || [];
 
     const jobs = matches.map(articleHtml => {
-      // Extraer enlace y título
       const titleMatch = articleHtml.match(/<a[^>]*href="(\/nx\/search\/jobs\/details\/~[^"]+)"[^>]*>(.*?)<\/a>/s) ||
                          articleHtml.match(/<a[^>]*href="(\/jobs\/~[^"]+)"[^>]*>(.*?)<\/a>/s);
 
       const rawLink = titleMatch ? titleMatch[1] : null;
       const rawTitle = titleMatch ? titleMatch[2].replace(/<[^>]+>/g, '').trim() : null;
 
-      // Extraer descripción limpia
       const descMatch = articleHtml.match(/<p[^>]*>(.*?)<\/p>/s) || articleHtml.match(/data-test="JobDescription"[^>]*>(.*?)<\/div>/s);
       let description = descMatch ? descMatch[1].replace(/<[^>]+>/g, ' ').trim() : '';
 
@@ -61,13 +64,12 @@ module.exports = async (req, res) => {
     return res.status(200).json({
       success: true,
       query: keyword,
-      provider: 'Scrape.do (Render + SuperProxy)',
       count: jobs.length,
       data: jobs
     });
 
   } catch (error) {
-    console.error('Error al ejecutar scraping:', error);
+    console.error('Error durante la ejecución del scraping:', error);
     return res.status(500).json({ success: false, error: error.message });
   }
 };
