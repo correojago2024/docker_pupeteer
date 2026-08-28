@@ -1,46 +1,40 @@
 module.exports = async (req, res) => {
-  // Configuración de cabeceras CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET');
 
   const keyword = req.query.q || 'wordpress';
-  const SCRAPE_DO_TOKEN = process.env.SCRAPE_DO_TOKEN || '3c2162fa0c8d46029d7a655532558984fad63d065db';
+  const ZENROWS_API_KEY = process.env.ZENROWS_API_KEY || 'c4999b5a9058783a516abbd706a7930de8a4f761';
 
-  // Apuntamos a la URL de búsqueda web de Upwork
+  // URL objetivo en Upwork
   const targetUrl = `https://www.upwork.com/nx/search/jobs/?q=${encodeURIComponent(keyword)}&sort=recency`;
 
-  // Se omitió render=true para evitar el timeout de 10s de Vercel.
-  // super=true + geoCode=us enruta la petición por residencial de EE.UU. rápido.
-  const scrapeDoUrl = `https://api.scrape.do/?token=${SCRAPE_DO_TOKEN}&url=${encodeURIComponent(targetUrl)}&super=true&geoCode=us`;
+  // Construcción de la URL de ZenRows
+  // antibot=true y premium_proxy=true evitan los bloqueos de Cloudflare rápidamente sin exceder los 10s de Vercel.
+  const zenrowsUrl = `https://api.zenrows.com/v1/?apikey=${ZENROWS_API_KEY}&url=${encodeURIComponent(targetUrl)}&antibot=true&premium_proxy=true`;
 
   try {
-    const response = await fetch(scrapeDoUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-        'Accept-Language': 'en-US,en;q=0.9'
-      }
-    });
+    const response = await fetch(zenrowsUrl);
 
     if (!response.ok) {
       return res.status(response.status).json({
         success: false,
-        error: `Scrape.do devolvió estado HTTP ${response.status}`
+        error: `ZenRows devolvió el estado HTTP ${response.status}`
       });
     }
 
     const htmlText = await response.text();
 
-    // Verificación de bloqueo Cloudflare en texto plano
+    // Detección de página de bloqueo
     if (htmlText.includes('Just a moment...') || htmlText.includes('Attention Required!')) {
       return res.status(200).json({
         success: false,
-        message: 'Respuesta retenida por la verificación de Cloudflare.',
+        message: 'La petición fue interceptada por el anti-bot de Cloudflare.',
         count: 0,
         data: []
       });
     }
 
-    // Extracción de ofertas usando regex sobre el código HTML
+    // Extracción de etiquetas de la respuesta HTML
     const jobRegex = /<article[\s\S]*?<\/article>/g;
     const matches = htmlText.match(jobRegex) || [];
 
@@ -51,7 +45,8 @@ module.exports = async (req, res) => {
       const rawLink = titleMatch ? titleMatch[1] : null;
       const rawTitle = titleMatch ? titleMatch[2].replace(/<[^>]+>/g, '').trim() : null;
 
-      const descMatch = articleHtml.match(/<p[^>]*>(.*?)<\/p>/s) || articleHtml.match(/data-test="JobDescription"[^>]*>(.*?)<\/div>/s);
+      const descMatch = articleHtml.match(/<p[^>]*>(.*?)<\/p>/s) || 
+                        articleHtml.match(/data-test="JobDescription"[^>]*>(.*?)<\/div>/s);
       let description = descMatch ? descMatch[1].replace(/<[^>]+>/g, ' ').trim() : '';
 
       return {
@@ -69,7 +64,7 @@ module.exports = async (req, res) => {
     });
 
   } catch (error) {
-    console.error('Error durante la ejecución del scraping:', error);
+    console.error('Error durante la ejecución con ZenRows:', error);
     return res.status(500).json({ success: false, error: error.message });
   }
 };
