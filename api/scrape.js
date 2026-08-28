@@ -19,59 +19,50 @@ module.exports = async (req, res) => {
 
   let browser;
   try {
-    // Solo bloqueamos imágenes y medios para acelerar, pero dejamos pasar CSS/JS para que React renderice los trabajos
-    const browserWSEndpoint = `wss://production-sfo.browserless.io?token=${BROWSERLESS_TOKEN}&--block-resources=image,media`;
+    // 1. IMPORTANTE: Usamos la ruta /stealth de Browserless con bypass de Cloudflare
+    const browserWSEndpoint = `wss://production-sfo.browserless.io/stealth?token=${BROWSERLESS_TOKEN}&--block-resources=image,media`;
     
     browser = await puppeteer.connect({ browserWSEndpoint });
 
     const page = await browser.newPage();
 
-    // 1. Emular una resolución y User-Agent real
-    await page.setViewport({ width: 1280, height: 800 });
+    // 2. Cabeceras HTTP reales para imitar un navegador humano
+    await page.setExtraHTTPHeaders({
+      'Accept-Language': 'en-US,en;q=0.9,es;q=0.8',
+      'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+    });
+
+    await page.setViewport({ width: 1366, height: 768 });
     await page.setUserAgent(
       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     );
 
-    // 2. Navegar esperando la carga inicial
+    // 3. Navegar a Upwork
     await page.goto(targetUrl, { waitUntil: 'domcontentloaded', timeout: 12000 });
 
-    // 3. Esperar específicamente a que aparezca cualquier contenedor de trabajo en el DOM
-    const selectorsToWait = [
-      'article',
-      '[data-test="job-tile-list"]',
-      'section[data-ev-label="search_results_impression"]'
-    ];
-    
-    await Promise.race(
-      selectorsToWait.map(selector => page.waitForSelector(selector, { timeout: 6000 }))
-    ).catch(() => null);
+    // Esperar a que cargue el contenido o el posible bloqueo
+    await new Promise(resolve => setTimeout(resolve, 2500));
 
-    // Un pequeño delay adicional para que termine el pintado de componentes
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    // Obtener el título de la página para verificar si fue bloqueado por Cloudflare
+    const pageTitle = await page.title();
 
-    // 4. Extracción flexibilizada de datos
+    // 4. Extraer empleos desde el DOM
     const jobs = await page.evaluate(() => {
-      // Buscar elementos tipo article o con data-test de empleo
-      const cards = Array.from(
-        document.querySelectorAll('article, [data-test="job-tile-list"] > div, section article')
-      );
+      // Buscar elementos tipo article o contenedores de trabajos de Upwork
+      const elements = Array.from(document.querySelectorAll('article, [data-test="job-tile-list"] > div'));
 
-      return cards.map(card => {
-        // Enlace y Título
-        const linkEl = card.querySelector('a[href*="/jobs/"], h2 a, h3 a, [data-test="UpLink"]');
+      return elements.map(el => {
+        const linkEl = el.querySelector('a[href*="/jobs/"], h2 a, h3 a');
         const title = linkEl ? linkEl.innerText.trim() : null;
         const link = linkEl ? linkEl.href : null;
 
-        // Presupuesto / Tipo de Trabajo
-        const typeEl = card.querySelector('[data-test="job-type"], [data-test="JobTileHeader"], ul.list-inline');
-        const jobType = typeEl ? typeEl.innerText.replace(/\n/g, ' ').trim() : 'No especificado';
+        const typeEl = el.querySelector('[data-test="job-type"], [data-test="JobTileHeader"]');
+        const jobType = typeEl ? typeEl.innerText.replace(/\n/g, ' ').trim() : '';
 
-        // Descripción
-        const descEl = card.querySelector('[data-test="JobDescription"], .job-description, p');
+        const descEl = el.querySelector('[data-test="JobDescription"], p');
         const description = descEl ? descEl.innerText.trim() : '';
 
-        // Tiempo de publicación
-        const timeEl = card.querySelector('[data-test="posted-on"], small, span.text-muted');
+        const timeEl = el.querySelector('[data-test="posted-on"], small');
         const postedTime = timeEl ? timeEl.innerText.trim() : '';
 
         return {
@@ -79,16 +70,18 @@ module.exports = async (req, res) => {
           link,
           jobType,
           postedTime,
-          description: description.substring(0, 180) + (description.length > 180 ? '...' : '')
+          description: description.substring(0, 150) + (description.length > 150 ? '...' : '')
         };
-      }).filter(job => job.title && job.link); // Filtrar solo los que realmente tengan título y enlace
+      }).filter(job => job.title && job.link);
     });
 
     await browser.disconnect();
 
+    // Si no encontró nada, devolvemos el título de la página devuelta para diagnosticar
     return res.status(200).json({ 
       success: true, 
       query: keyword,
+      pageTitle: pageTitle, // Nos dirá si apareció "Attention Required! | Cloudflare" o similar
       count: jobs.length, 
       data: jobs 
     });
