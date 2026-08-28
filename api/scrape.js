@@ -1,15 +1,17 @@
-
 const puppeteer = require('puppeteer-core');
 
 module.exports = async (req, res) => {
-  // Configurar CORS para permitir peticiones desde cualquier origen
+  // Configurar cabeceras de CORS
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET');
 
+  // Parámetros de búsqueda (ejemplo: /api/scrape?q=react&sort=recency)
   const keyword = req.query.q || 'nodejs';
-  const targetUrl = `https://www.upwork.com/nx/search/jobs/?q=${encodeURIComponent(keyword)}`;
+  const sort = req.query.sort || 'recency'; // 'recency' para ver los más nuevos
   
-  // Obtener el Token de las variables de entorno
+  // URL de búsqueda de Upwork
+  const targetUrl = `https://www.upwork.com/nx/search/jobs/?q=${encodeURIComponent(keyword)}&sort=${sort}`;
+  
   const BROWSERLESS_TOKEN = process.env.BROWSERLESS_TOKEN;
 
   if (!BROWSERLESS_TOKEN) {
@@ -21,45 +23,76 @@ module.exports = async (req, res) => {
 
   let browser;
   try {
-    // Conectarse remotamente a Browserless.io mediante WebSocket
+    // Conexión remota al navegador mediante Browserless.io
     browser = await puppeteer.connect({
       browserWSEndpoint: `wss://production-sfo.browserless.io?token=${BROWSERLESS_TOKEN}`
     });
 
     const page = await browser.newPage();
 
-    // Configurar User-Agent estándar
+    // 1. Ocultar huellas de automatización e imitar una pantalla de laptop normal
+    await page.setViewport({ width: 1366, height: 768 });
     await page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36'
+      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36'
     );
 
-    // Navegar a la página de Upwork
+    // 2. Navegar a Upwork esperando a que la red se estabilice
     await page.goto(targetUrl, { waitUntil: 'networkidle2', timeout: 30000 });
 
-    // Esperar a que carguen los contenedores de los empleos
-    await page.waitForSelector('article', { timeout: 10000 }).catch(() => null);
+    // 3. Esperar a que carguen los elementos de las tarjetas de trabajo
+    const jobSelector = 'section[data-ev-label="search_results_impression"] article, article.job-tile';
+    await page.waitForSelector(jobSelector, { timeout: 12000 }).catch(() => null);
 
-    // Extraer datos
+    // 4. Extraer los datos directamente del DOM cargado en la página
     const jobs = await page.evaluate(() => {
+      // Buscar todos los artículos/tarjetas de empleo
       const articles = Array.from(document.querySelectorAll('article'));
+
       return articles.map(art => {
-        const titleEl = art.querySelector('h2 a') || art.querySelector('h3 a');
+        // Extraer Título y Enlace
+        const titleEl = art.querySelector('h2 a, h3 a, a[data-test="UpLink"]');
+        const title = titleEl ? titleEl.innerText.trim() : 'Sin título';
+        const link = titleEl ? titleEl.href : null;
+
+        // Extraer Tipo de Pago (Tarifa por hora o Precio fijo / Presupuesto)
+        const jobTypeEl = art.querySelector('[data-test="job-type"], [data-test="JobTileHeader"]');
+        const jobType = jobTypeEl ? jobTypeEl.innerText.replace(/\n/g, ' ').trim() : 'No especificado';
+
+        // Extraer Descripción breve / Snippet
+        const descriptionEl = art.querySelector('[data-test="JobDescription"], .job-description, p');
+        const description = descriptionEl ? descriptionEl.innerText.trim() : '';
+
+        // Extraer la antigüedad del post (ej. "Posted 10 minutes ago")
+        const postedTimeEl = art.querySelector('[data-test="posted-on"], small, span.text-muted');
+        const postedTime = postedTimeEl ? postedTimeEl.innerText.trim() : '';
+
+        // Extraer Nivel de experiencia requerido (Entry, Intermediate, Expert)
+        const expLevelEl = art.querySelector('[data-test="experience-level"]');
+        const experienceLevel = expLevelEl ? expLevelEl.innerText.trim() : '';
+
         return {
-          title: titleEl ? titleEl.innerText.trim() : null,
-          link: titleEl ? titleEl.href : null,
-          snippet: art.innerText.substring(0, 150).replace(/\n/g, ' ')
+          title,
+          link,
+          jobType,
+          postedTime,
+          experienceLevel,
+          description: description.substring(0, 200) + (description.length > 200 ? '...' : '')
         };
-      });
+      }).filter(job => job.link !== null); // Descartar contenedores vacíos
     });
 
-    // Desconectar el navegador
     await browser.disconnect();
 
-    return res.status(200).json({ success: true, count: jobs.length, data: jobs });
+    return res.status(200).json({ 
+      success: true, 
+      query: keyword,
+      count: jobs.length, 
+      data: jobs 
+    });
 
   } catch (error) {
     if (browser) await browser.disconnect();
-    console.error('Error en scraping:', error);
+    console.error('Error al realizar el scraping en Upwork:', error);
     return res.status(500).json({ success: false, error: error.message });
   }
 };
